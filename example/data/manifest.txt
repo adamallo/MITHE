@@ -1,0 +1,2 @@
+Test1 Control.bam Sample1.bam Sample2.bam 20
+Test2 Control.bam Sample3.bam Sample4.bam 20
