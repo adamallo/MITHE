@@ -7,12 +7,14 @@ use File::Path;
 use File::Basename;
 use Sort::Key::Natural;
 use Sort::Key::Maker nat_i_sorter => qw(nat integer);
+use Bio::DB::HTS::Tabix;
 
 #IO
 my $indir="";
 my $covB="covB";
 my $PAF="PAF";
 my $filt_file="";
+STDOUT->autoflush(1);
 
 #Configuration variables
 my $OFS="\t";
@@ -45,17 +47,21 @@ my $usage="Usage: $0 -d directory -n number_of_samples -o output_prefix [options
     'min_alternative_reads|a=i' =>\$max_alternate_reads,
     'filt_file=s' => \$filt_file,
     'help|h' => \$help,
-                )) or (($output_sufix eq "") || ($indir eq "") || ($nsamples == 0) || $help) and die $usage;
+                )) or (($output_sufix eq "") || ($indir eq "") || (! -d $indir) || ($nsamples == 0) || $help) and die $usage;
 
+#Get environment variables
+my $GNOMAD=$ENV{'GNOMAD'};
 
 ##Main data structures
 my @dicts; #Array of dict arrays, one per sample, with information on all their variants
-my @sdicts; #Array of dict arrays, one per sample, with information on all the variants, after syncing without recalling (non-present variants can only be 0/0 or ?/?)
-my @rdicts; #Array of dict arrays, one per samle, with information on all the variants after re-calling considering all other samples
+my @fdicts; #Array of dict arrays, one per sample, with information on all the variants filtered (kept) by MITHE.
+my @sdicts; #Array of dict arrays, one per sample, with information on all the variants filtered (kept) by MITHE, after syncing without recalling (non-present variants can only be 0/0 or ?/?)
+my @rdicts; #Array of dict arrays, one per samle, with information on all the variants filtered (kept) by MITHE, after re-calling considering all other samples
 my %vars; #Dict of variants, with information on the number of samples that carry them
 my %rvars; #Dict of variants, after re-calling considering all other samples
 my %samples; #Dict of samples (SXX format), with refs to arrays with the number of clonal, subclonal, and private mutations
 my %rsamples; #Dict of samples (SXX format), with refs to arrays with the number of clonal, subclonal, and private mutations after re-calling considering all other samples
+my %nvars; #Dict of variant information in the normal
 
 my @ovcfs; #Array of the original vcf filenames for each sample
 my @folders;
@@ -79,20 +85,41 @@ else
     $ref_parse_function=\&parse_all_vcf;
 }
 
-print("Parsing vcf input files from all comparisons of $nsamples samples in the folder $indir\n");
+#Parsing original vcf files
+my @samplename;
+print("\nParsing original vcf input files from all $nsamples samples in the folder $indir:\n");
+#Information to find the files that contain the variants we want
+open(my $vcfdictFH, "$indir/vcfdict.csv") or die "ERROR: $indir/vcfdict.csv cannot be opened\n";
+my @vcfdictcontent=<$vcfdictFH>;
+close($vcfdictFH);
 
-#Parsing vcf files
-
-#Initializing dictionaries
 for (my $i=0; $i<$nsamples; ++$i)
 {
-    $dicts[$i]={};
-}
+    my $sample=sprintf("S%0*d",$ndigits,$i);
+    
+    #Detecting sample, and finding the file to parse and store to use as vcf input for output
+    ($ovcfs[$i],$samplename[$i])=get_vcf_samplename(",.*$sample#",\@vcfdictcontent);
 
+    print("\tParsing $sample name $samplename[$i], original vcf file $ovcfs[$i]...");
+    
+    $dicts[$i]=$ref_parse_function->($ovcfs[$i]);
+    
+    print("Done\n");
+}
+print("Done\n");
+
+#Parsing final vcf input files to select among the original samples
+print("\nParsing filtered vcf input files from all comparisons of $nsamples samples in the folder $indir...");
+
+#Parsing vcf files
 my $name=basename(Cwd::abs_path("$indir"));
 my $outdir=join("_",$indir,$output_sufix);
 
-my @samplename;
+#Initializing fdicts
+for (my $i=0; $i<$nsamples; ++$i)
+{
+   $fdicts[$i]={};
+}
 
 ##Main parsing loop
 for (my $i=0; $i<$nsamples-1; ++$i)
@@ -112,35 +139,31 @@ for (my $i=0; $i<$nsamples-1; ++$i)
         my @vcfdictcontent=<$vcfdictFH>;
         close($vcfdictFH);
 
-        print("\tFolder $folder\n");
-    
         my @afiles=get_files(\@vcfdictcontent,"Afilt${covB}NAB${PAF}#.*different.vcf");
         my @bfiles=get_files(\@vcfdictcontent,"Bfilt${covB}NAB${PAF}#.*different.vcf");
         my @commonfiles=get_files(\@vcfdictcontent,"^filt${covB}NABU${PAF}#.*common.vcf");
 
         scalar  @afiles != 1 || scalar @bfiles != 1 || scalar @commonfiles != 1 and die "Error detecting input vcf files in folder $folder\n";
     
-        $dicts[$i]=add_vcfvariants($dicts[$i],\@afiles); ##POSSIBLE PROBLEM
-        $dicts[$j]=add_vcfvariants($dicts[$j],\@bfiles); ##POSSIBLE PROBLEM
+        $fdicts[$i]=add_vcfvariants($fdicts[$i],\@afiles); ##POSSIBLE PROBLEM
+        $fdicts[$j]=add_vcfvariants($fdicts[$j],\@bfiles); ##POSSIBLE PROBLEM
        
         #I don't have a subroutine for two but I could 
         my $refhash=$ref_parse_function->($commonfiles[0]);
-        $dicts[$i]={%{$dicts[$i]},%$refhash}; ##POSSIBLE PROBLEM
-        $dicts[$j]={%{$dicts[$j]},%$refhash}; ##POSSIBLE PROBLEM
-        
-        #Getting the name of Asample and the original vcf file 
-        if($j==$i+1) ##In the inside loop because we need to parse one of the specific vcfdict files 
-        {
-            ($ovcfs[$i],$samplename[$i])=get_vcf_samplename(",.*${Asample}#",\@vcfdictcontent);##TODO:I know this one is originally as an absolute path. This is a mess and should be solved
+        $fdicts[$i]={%{$fdicts[$i]},%$refhash}; ##POSSIBLE PROBLEM
+        $fdicts[$j]={%{$fdicts[$j]},%$refhash}; ##POSSIBLE PROBLEM    
+    }
+}
 
-            print("\t\t$Asample name $samplename[$i], original vcf file $ovcfs[$i]\n");
-            if($j==$nsamples-1)
-            {
-               ($ovcfs[$j],$samplename[$j])= get_vcf_samplename(",.*${Bsample}#",\@vcfdictcontent);##TODO:I know this one is originally as an absolute path. This is a mess and should be solved
+##Loop to update information graving it from @dicts
+##When parsing fdicts, the value information with read counts is not correct for common variants. Here, we fix this copying that information from @dicts, which is a superset of variants with correct information
 
-            print("\t\t$Bsample name $samplename[$j], original vcf file $ovcfs[$j]\n");
-            }
-        }
+for (my $isample=0; $isample<$nsamples; ++$isample)
+{
+    foreach my $var (keys %{$fdicts[$isample]})
+    {
+        ! defined $dicts[$isample]->{$var} and die "Variant present in a filtered file is not present in the original file. This should not be possible and shows that there is something wrong with the files or this script";
+        $fdicts[$isample]->{$var}=[@{$dicts[$isample]->{$var}}];#Deep copy of the variant information from $dict to $fdicts
     }
 }
 
@@ -151,19 +174,29 @@ print("\nAnalyzing and summarizing original variants... ");
 ##Dictionary of variants, with number of samples that bear them
 for (my $isample=0; $isample<$nsamples; ++$isample)
 {
-    foreach my $var (keys %{$dicts[$isample]})
+    foreach my $var (keys %{$fdicts[$isample]})
     {
         $vars{$var}+=1;
     }
     
 } #foreach my $sample
 
+##DEBUG
+#for (my $isample=0; $isample<$nsamples; ++$isample)
+#{
+#    foreach my $var (keys %{$fdicts[$isample]})
+#    {
+#        print("DEBUG: Sample $isample, variant $var, info ".join(" ",@{$dicts[$isample]->{$var}})."\n");
+#    }
+#    
+#} #foreach my $sample
+
 ##Dictionary of samples, with the number of private, shared, clonal mutation
 for (my $isample=0; $isample<$nsamples; ++$isample)
 {
     my $Asample=sprintf("S%0*d",$ndigits,$isample);
     $samples{$Asample}=[0,0,0];
-    foreach my $var (keys %{$dicts[$isample]})
+    foreach my $var (keys %{$fdicts[$isample]})
     {
         if($vars{$var}>1)
         {
@@ -185,7 +218,11 @@ for (my $isample=0; $isample<$nsamples; ++$isample)
 } #foreach my $sample
 print("Done\n");
 
-print("\nParsing covB files to get cross-sample basic information...\n");
+print("\nObtaining population allele frequency data for all parsed filtered variants... ");
+my %PAF_data=%{getPAFdata(\%vars)};
+print("Done\n");
+
+print("\nParsing covB files to get cross-sample basic information... ");
 
 opendir(my $dirhandler,$indir) or die "ERROR opening the directory $indir\n";
 my @covB_files=grep {/covB.*\.tsv/} readdir($dirhandler);
@@ -203,6 +240,17 @@ for (my $i=0; $i<$nsamples; ++$i)
 
 print("Done\n");
 
+#Parsing N
+print("\nParsing covN file to get control sample information... ");
+opendir($dirhandler,$indir) or die "ERROR opening the directory $indir\n";
+my @covN_files=grep {/covN.*\.tsv$/} readdir($dirhandler);
+closedir($dirhandler);
+scalar @covN_files != 1 and die "Error detecting the covN file, detected ".scalar @covN_files." instead of one\n";
+my $nfile=join("/",$indir,$covN_files[0]);
+%nvars=%{parse_tsv($nfile)};
+print("Done\n");
+
+#Re-calling
 print("\nRe-calling variants considering multiple samples...\n\tINFO: Minimum number of reads for call: $min_coverage, Minimun number of alternative reads for call: $max_alternate_reads\n");
 
 for (my $isample=0; $isample<$nsamples; ++$isample)
@@ -214,39 +262,67 @@ for (my $isample=0; $isample<$nsamples; ++$isample)
     foreach my $var (keys %vars)
     {
         my $realvar=$var;
-        #Existing variant, just copy it (deep copy)
-        if(exists $dicts[$isample]->{$var})
+        
+        #Existing filtered variant, just copy it and we are done with it (deep copy)
+        if(exists $fdicts[$isample]->{$var})
         {
-            $refdictr->{$var}=[@{$dicts[$isample]->{$var}}];
-            $refdicts->{$var}=[@{$dicts[$isample]->{$var}}];
+            $refdictr->{$var}=[@{$fdicts[$isample]->{$var}}];
+            $refdicts->{$var}=[@{$fdicts[$isample]->{$var}}];
+            next;
         }
-        else ##Variant in others but not in this sample
+        else 
         {
-            $refdictr->{$var}=$refdicts->{$var}=["?/?",undef,undef,undef]; #By default, we don't know what this is
-            while (defined $var) ##Variant modification (see below)
+            if (exists $dicts[$isample]->{$var}) ##Variant in original vcf file for this sample, but removed by MITHE
             {
-                if(exists $covBdata[$isample]->{$var}) ##Read count information found
+                #Copy the information
+                $refdictr->{$var}=[@{$dicts[$isample]->{$var}}];
+                $refdicts->{$var}=[@{$dicts[$isample]->{$var}}];
+                
+                #But change the genotype to undetermined, since it was removed by MITHE. It will be recalled below if needed
+                $refdictr->{$var}->[0]="?/?";
+                $refdicts->{$var}->[0]="?/?";
+
+                print("\n\tDEBUG: variant $var in sample $isample was discarded by MITHE\n");
+            }
+            else ##We get the information from covB. It must be there, otherwise there is a problem with the data
+            {
+                if(! exists $covBdata[$isample]->{$realvar}) #The original variable is not present in covB, so we need to simplify it to get depth information
                 {
-                    if($covBdata[$isample]->{$var}->[0]>=$min_coverage) ##Enough information to call the variant
-                    {
-                        if($covBdata[$isample]->{$var}->[2]>=$max_alternate_reads) ##Alternative for the recall version, ?/? for the other (we don't do anything)
-                        {
-                            
-                            $refdictr->{$realvar}=[$covBdata[$isample]->{$var}->[2]>$covBdata[$isample]->{$var}->[1]?"1/0":"0/1",@{$covBdata[$isample]->{$var}}];
-                        }
-                        else ##Reference
-                        {
-                            $refdictr->{$realvar}=$refdicts->{$realvar}=["0/0",@{$covBdata[$isample]->{$var}}];
-                        }
-                    }
-                    last;
+                    $var=altvar($realvar);
+                    exists $covBdata[$isample]->{$var} or die "ERROR: no covB information for $realvar or $var in sample $isample\n"; #Neither variants are present, but they should
                 }
-                else ##There isn't any information for this variant. Modifying it to eliminate specific alternatives
+                
+                #The variant was never called for this sample, so we considered it 0/0 for the non-recalling option. For the re-calling option, we initiate it as ?/?, because we will re-call it if we can.
+                #covBdataformat:\@[number of total reads, number of reference reads, number of alternative reads supporting this variant, number of total alternative reads]
+                #dictformat: genotype, total reads, reference reads, this alternative reads
+                $refdicts->{$realvar}=["0/0",@{$covBdata[$isample]->{$var}}[0..1],0]; 
+                $refdictr->{$realvar}=["?/?",@{$covBdata[$isample]->{$var}}[0..1],0];
+                
+                #If the alternative is the same, we copy the number of alternatives, otherwise it should be 0
+                if($var eq $realvar)
                 {
-                    $var=altvar($var);
+                    $refdicts->{$realvar}->[3]=$covBdata[$isample]->{$var}->[2];
+                    $refdictr->{$realvar}->[3]=$covBdata[$isample]->{$var}->[2];
                 }
-            }#while variant defined
-        }#not in this sample
+
+                print("\n\tDEBUG: variant $realvar, here as $var, in sample $isample was never present, so we are using covB information and setting it as 0/0 for the regular output and ?/? for the recall output. Variant information: ".join(" ",@{$refdicts->{$realvar}})."\n");
+            }
+        }
+        #There are some problems here
+        #Re-calling. Only modifies refdictr
+        if($refdicts->{$realvar}->[1]>=$min_coverage) ##Enough information to call the variant
+        {
+            if($refdicts->{$realvar}->[3]>=$max_alternate_reads) #We recall the variant here for the recalling output, ?/? for the other (we don't do anything). ATTENTION: recalling never generates an homozygous variant call. We may want to modify this if all the reads are variants?
+            {
+                print("\n\tDEBUG: recalling $var\n");
+                $refdictr->{$realvar}->[0]=$covBdata[$isample]->{$var}->[2]>$covBdata[$isample]->{$var}->[1]?"1/0":"0/1";
+            }
+            elsif($refdicts->{$realvar}->[1]-$refdicts->{$realvar}->[2]<$max_alternate_reads)#Difference between the total number of reads and the number of reference reads, to calculate the number of alternative reads of any kind #There was enough depth and not too many alternate reads, so we call this as reference. WARNING: this may be too stringent if the depth is extreme. It is probably better to use proportion of reads instead of an absolute number. I am using any variant, instead of the variant of interest, because this will work much better with indels that are difficult to call, and would otherwise be called 0/0 here when it is unclear if it is the same indel but with the breakpoints not detected properly or a different one.
+            {
+                $refdictr->{$realvar}->[0]="0/0";
+            }
+        }
+
     }#foreach variant
 }
 
@@ -316,6 +392,10 @@ write_sample_file("$outdir/stats/sample_recalled.csv",\%rsamples);
 #Variant files, with the number of samples that contain them and a classification of clonal, subclonal, and private
 write_variant_file("$outdir/stats/var.csv",\%vars);
 write_variant_file("$outdir/stats/var_recalled.csv",\%rvars);
+
+#Comprehensive variant file, similar to ITHE results
+write_full_variantlist_file("$outdir/stats/final_variants.csv",\%vars,\@sdicts);
+write_full_variantlist_file("$outdir/stats/final_variants_recalled.csv",\%rvars,\@rdicts);
 
 #CSV files with the genotype in each sample for each variant
 write_genotype_file("$outdir/stats/genotypes.csv",\@sdicts,\%vars);
@@ -492,6 +572,66 @@ sub write_variant_file
     close($OUT_VAR_STATS);
 }
 
+sub write_full_variantlist_file
+{
+    my ($filename,$refvar,$refdict)=@_;
+    mopen(my $OUT_FULLVAR, ">$filename");
+    #print($OUT_VAR_STATS "CHROM,POS,ID,REF,ALT,NSAMPLES,KIND\n");
+    print($OUT_FULLVAR "CHROM,POS,REF,ALT,SAMPLE,GT,Depth,VariantN,NormalDepth,NormalVariantN,NormalThisVariantN,PAF,INDEL\n");
+    my @int_v;
+    my @sortedvars=nat_i_sorter{@int_v=split($OFS,$_);$int_v[0],$int_v[1]} keys %$refvar;
+    my ($genotype,$sample_depth,$sample_variant_reads,$normal_depth,$normal_variant_reads,$normal_this_variant_reads,$paf,$indel);
+    my $sample;
+    my @keyinfo;
+    my @varinfo;
+    my $nvar;
+
+    foreach my $var (@sortedvars)
+    {
+        #Identify if it is an indel
+        $indel=isindel($var);
+
+        #Get normal information. In the normal, it may be that the variant does not have the same alternative information, here substituted by a "." and the reference simplified to just one position if it was an indel
+        if(! defined $nvars{$var})
+        {
+            $nvar=altvar($var);
+        }
+        else
+        {
+            $nvar=$var;
+        }
+        
+        ! defined $nvars{$nvar} and warn "$var information not found in the normal\n";
+        ($normal_depth,$normal_variant_reads,$normal_this_variant_reads)=@{$nvars{$nvar}}[0,3,2];
+
+        #print("DEBUG: original variant: \"$var\", modified variant: \"$nvar\". Information:".join(",",@{$nvars{$nvar}}[2,0,1])."\n");
+
+        #Get PAF information
+        ! defined $PAF_data{$var} and warn "$var information not found in PAF\n";
+        $paf=@{$PAF_data{$var}}[1];
+
+        @keyinfo=split($OFS,$var);
+
+        #Get Sample-Specific information    
+        for (my $isample=0; $isample<$nsamples; ++$isample)
+        {
+            my $sample=sprintf("S%0*d",$ndigits,$isample);
+            
+            if(defined $refdict->[$isample]->{$var})
+            {
+                @varinfo=@{$refdict->[$isample]->{$var}};
+                ($genotype,$sample_depth,$sample_variant_reads)=@varinfo[0,1,3];
+                print($OUT_FULLVAR join(",",@keyinfo[0..3],$samplename[$isample],$genotype,$sample_depth,$sample_variant_reads,$normal_depth,$normal_variant_reads,$normal_this_variant_reads,$paf,$indel."\n"));
+            }
+#            else
+#            {
+#                print("DEBUG: variant $var not present in sample $sample\n");
+#            }
+        }
+    }
+    close($OUT_FULLVAR);
+}
+
 sub write_sample_file
 {
     my ($filename,$refdata)=@_;
@@ -509,11 +649,16 @@ sub write_sample_file
 sub altvar
 {
     my ($var)=@_;
+    my $indel=isindel($var);
     if($var=~m/$OFS\.$/)
     {
         return undef
     }
-    $var=~s/$OFS[^$OFS]*$/$OFS\./g;
+    if ($indel eq 1)
+    {
+        $var=~s/$OFS([^$OFS])([^$OFS]*)$OFS([^$OFS]*)$/$OFS$1$OFS$3/;
+    }
+    $var=~s/$OFS[^$OFS]*$/$OFS./;
     return $var;
 }
 
@@ -658,44 +803,75 @@ sub parse_all_vcf
     return \%hash;
 }
 
-# Parses a TSV file (covN or covB), returning a reference to a hash with a key indicating each variant and the value an array reference to [number of total reads, number of reference reads, number of alternative reads]
-# TODO: ATTENTION: We can have multiple-SNV here. I think this should not be like that. I should eliminate the multiple-SNVs in the VCF file. Right now this would change all the covB filter structure and therefore I am patching it up here. If I fix it in the other place, I should remove the separation of mutiple alternatives here
+#WARNING the order of information in the value of this dict is different than other version of this function used in other components of ITHE/MITHE
+
+#Parses a TSV file (covN or covB) and returns a dictionary with variant ids and values \@[number of total reads, number of reference reads, number of alternative reads supporting this variant, number of total alternative reads]. Foreach position, at least three entries are added: one with information on the specific variant, another with specific reference but flexible variant ("."), and the last one with only position information. The first is the preferred one, the second is necessary for cases in which 0 variants are found in the normal (or a different variant than in the problem samples), the third is needed in INDELS due to the different annovar format. As noted below, an insertion from A to AC in annovar would be coded as - C. However, UnifyGenotyper would call it as A . if the INDEL is not called. There is no way to go from one format to the other without accessing the reference genome.
+#Here I am not using the output of annovar yet, but I will.
 sub parse_tsv
 {
     my ($file)=@_;
     mopen(my $FT, $file);
     my @content=<$FT>;
     close($FT);
-    my %hash;
-    my ($chr, $pos, $ref, $alt, $nref, $nalt);
+    my %data;
+    my @temp;
+    my @format;
+    my @sample;
+    my ($chr, $pos, $ref, $alt, $nref, $nvarreads, $nreads);
+    my ($newalt,$newref,$newpos); #IMPORTANT NOTE: Annovar uses a different ref/alt format for INDELS. They never contain repeated information. For example, if ref is A and alt AC, in annovar this will be noted as - C. This generates downstream problems. I am adding a second entry with this format to solve it.
+    my @alts;
+    my @array_nvarreads;
+
     foreach my $line (@content)
     {
         chomp($line);
-        my @biallelicSNVs=separateTriallelic($line);
-        foreach my $snv (@biallelicSNVs)
+        if (!($line =~ m/^#/))
         {
-            ($chr, $pos, $ref, $alt, $nref, $nalt)=split($IFS,$snv);
-            $hash{join($OFS,$chr,$pos,$ref,$alt)}=[$nref+$nalt, $nref, $nalt];
+            @temp=split("\t", $line);
+            ($chr, $pos, $ref, $alt, $nref, $nvarreads)=@temp;
+
+            @alts=split(",",$alt);
+            @array_nvarreads=split(",",$nvarreads);
+            ##We add a indetermined variant with 0 alternatives. If this was already present in the call, it will be eliminated since we are later using a hash, otherwise, it will provide info if the alternative in the problems is different than in the normal
+            push(@alts,".");
+            push(@array_nvarreads,0);
+
+            $nvarreads=0;
+
+            foreach my $thisvarreads (@array_nvarreads)
+            {
+                $nvarreads+=$thisvarreads;
+            }
+
+            $nreads = $nref+$nvarreads;
+
+            for (my $ialt=0; $ialt<scalar @alts; ++$ialt)
+            {
+                $data{join($OFS,$chr,$pos,$ref,$alts[$ialt])}=[$nreads,$nreads-$nvarreads,$array_nvarreads[$ialt],$nvarreads];
+                $data{join($OFS,$chr,$pos)}=[$nreads,$nreads-$nvarreads,$array_nvarreads[$ialt],$nvarreads];
+
+                if($alts[$ialt]=~m/^$ref/) ##Adding a second entry, as explained in the "important note" right above
+                {
+                    ($newref,$newalt)=($ref,$alts[$ialt]);
+                    $newref="-";
+                    $newalt=~s/^\Q$ref//;
+                    $data{join($OFS,$chr,$pos,$newref,$newalt)}=[$nreads,$nreads-$nvarreads,$array_nvarreads[$ialt],$nvarreads];
+                }
+                if($ref=~m/^$alts[$ialt]/) ##Adding a second entry, as explained in the "important note" right above
+                {
+                    ($newref,$newalt)=($ref,$alts[$ialt]);
+                    $newalt="-";
+                    $newref=~s/^\Q$alts[$ialt]//;
+                    $newpos=$pos+length($alts[$ialt]);
+                    #print("DEBUG: before $ref, $alt, $pos. after: $newref, $newalt, $newpos\n");
+                    $data{join($OFS,$chr,$pos,$newref,$newalt)}=[$nreads,$nreads-$nvarreads,$array_nvarreads[$ialt],$nvarreads];
+                }
+            }
         }
     }
-    return \%hash;
-}
+    #print("DEBUG:",join(",",keys %data),"\n");
+    return \%data;
 
-# TODO: ATTENTION: We can have multiple-SNV here. I think this should not be like that. I should eliminate the multiple-SNVs in the VCF file. Right now this would change all the covB filter structure and therefore I am patching it up here. If I fix it in the other place, I should remove the separation of mutiple alternatives here
-sub separateTriallelic
-{
-    my ($line)=@_;
-    my @columns=split($IFS,$line);
-    my @alts=split($MFS,$columns[3]);
-    my @nalts=split($MFS,$columns[5]);
-    scalar @alts != scalar @nalts and die "ERROR: tsv input with different number of alternative variants and information on the number of alternative reads\n";
-    my @outcontent;
-    for (my $i=0; $i<scalar @alts; ++$i)
-    {
-        push(@outcontent,join($IFS,@columns[0..2],$alts[$i],$columns[4],$nalts[$i]));
-    }
-    
-    return @outcontent;
 }
 
 # Writes a vcf with the variables contained in a hash selected from another VCF file
@@ -779,3 +955,75 @@ sub mopen
     return $_[0];
 }
 
+##Returns a hash ref to the population allele frequency information for all variants present in the input reference hashes
+#The tabix query gets the data we are looking for and also some neighbors. To keep the output data clean from those, we handle two different hashes.
+sub getPAFdata
+{
+    my $tabix = Bio::DB::HTS::Tabix->new( filename =>$GNOMAD );
+    my %outdata; #key: CHROM${OFS}POS${OFS}REF${OFS}ALT value: [$tfilt,$taf];
+    my $parsedPAFS;
+    my %obtainedPAFs; #key = CHROM${OFS}POS${OFS}REF${OFS}ALT #value = [$tfilt, $taf]
+    my $tabix_iter;
+    my ($chr, $nstart, $ref, $alt);
+    my $line;
+    my $i;
+    my ($ref_hash)=@_;
+    my ($tstart,$talt,$tref,$tfilt,$taf);
+
+    foreach my $key (keys %{$ref_hash})
+    {
+        #key = CHROM${OFS}POS${OFS}REF${OFS}ALT
+        unless (exists $obtainedPAFs{$key})
+        {
+            ##Obtain gnomAD data for this genomic position if it has not been obtained before. MULI-SNVs are represented in different lines
+            ($chr,$nstart,$ref,$alt)=split($OFS,$key);
+            $tabix_iter=$tabix->query("$chr:$nstart-".($nstart+1));
+            if(defined $tabix_iter)
+            {
+                while($line=$tabix_iter->next)
+                {
+                    #CHROM  POS ID  REF ALT QUAL    FILTER  INFO    FORMAT  S1 ... SN
+                    $line =~ s/^[^\t]+\t([^\t]+)\t[^\t]+\t([^\t]+)\t([^\t]+)\t[^\t]+\t([^\t]+)\t[^\t]*AF=([^;]+).*$/$1\t$3\t$2\t$4\t$5/;
+                    ($tstart,$talt,$tref,$tfilt,$taf)=split("\t",$line);
+                    $obtainedPAFs{"$chr$OFS$tstart$OFS$tref$OFS$talt"}=[$tfilt,$taf];
+                }
+
+            }
+#DEBUG
+#             else
+#             {
+#                 warn "There is no data for $chr:$nstart-".($nstart+1);
+#             }
+        }
+
+        unless (exists $outdata{$key}) ##If it exists we don't need to do anything, otherwise, we copy the data if we have it, or add NA data since we know we have tried to obtain it and it is not available
+        {
+            if(exists $obtainedPAFs{$key})
+            {
+                $outdata{$key}=$obtainedPAFs{$key};
+            }
+            else
+            {
+                $outdata{$key}=["NA","NA"];
+            }
+        }
+    }#foreach varid
+
+    return \%outdata;
+}
+
+sub isindel
+{
+    my ($key)=@_;
+    my ($chr,$pos,$ref,$alt)=split($OFS,$key);
+
+    $ref =~ s/-//g;
+    $alt =~ s/-//g;
+
+    if(length $ref != length $alt)
+    {
+        return 1;
+    }
+
+    return 0;
+}
