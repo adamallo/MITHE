@@ -14,7 +14,7 @@ my $indir="";
 my $covB="covB";
 my $PAF="PAF";
 my $filt_file="";
-STDOUT->autoflush(1);
+STDOUT->autoflush(1); #Auto flush stdout
 
 #Configuration variables
 my $OFS="\t";
@@ -145,8 +145,8 @@ for (my $i=0; $i<$nsamples-1; ++$i)
 
         scalar  @afiles != 1 || scalar @bfiles != 1 || scalar @commonfiles != 1 and die "Error detecting input vcf files in folder $folder\n";
     
-        $fdicts[$i]=add_vcfvariants($fdicts[$i],\@afiles); ##POSSIBLE PROBLEM
-        $fdicts[$j]=add_vcfvariants($fdicts[$j],\@bfiles); ##POSSIBLE PROBLEM
+        $fdicts[$i]=add_variants($fdicts[$i],\@afiles,$ref_parse_function); ##POSSIBLE PROBLEM
+        $fdicts[$j]=add_variants($fdicts[$j],\@bfiles,$ref_parse_function); ##POSSIBLE PROBLEM
        
         #I don't have a subroutine for two but I could 
         my $refhash=$ref_parse_function->($commonfiles[0]);
@@ -166,6 +166,26 @@ for (my $isample=0; $isample<$nsamples; ++$isample)
         $fdicts[$isample]->{$var}=[@{$dicts[$isample]->{$var}}];#Deep copy of the variant information from $dict to $fdicts
     }
 }
+
+print("Done\n");
+
+print("\nParsing variant annotations to get name, position, and type for each variant...");
+
+my $annovarfilestring=`ls $indir/*/S*.annotated.variant_function`; #Superset of files I need, since they are repeated across comparisons
+my @tempannovarfiles=split("\n",$annovarfilestring);
+my %annovarfiles;
+my %exomicAnnovarFiles;
+foreach my $file (@tempannovarfiles) #I am using the name of the sample in SX format as the value to generate the unique list of files easily
+{
+    my $key=basename($file);
+    $key=~s/^(S[0-9]*)#.*$/$1/g;
+    $annovarfiles{$key}=$file;
+    $file=~s/annotated\.variant/annotated.exonic_variant/;
+    $exomicAnnovarFiles{$key}=$file;
+}
+
+my %annotationData=%{add_variants({},[values %annovarfiles],\&parse_annovar)};
+my %exonicAnnotationData=%{add_variants({},[values %exomicAnnovarFiles],\&parse_annovar_exonic)};
 
 print("Done\n");
 
@@ -282,7 +302,7 @@ for (my $isample=0; $isample<$nsamples; ++$isample)
                 $refdictr->{$var}->[0]="?/?";
                 $refdicts->{$var}->[0]="?/?";
 
-                print("\n\tDEBUG: variant $var in sample $isample was discarded by MITHE\n");
+                #print("\n\tDEBUG: variant $var in sample $isample was discarded by MITHE\n");
             }
             else ##We get the information from covB. It must be there, otherwise there is a problem with the data
             {
@@ -305,7 +325,7 @@ for (my $isample=0; $isample<$nsamples; ++$isample)
                     $refdictr->{$realvar}->[3]=$covBdata[$isample]->{$var}->[2];
                 }
 
-                print("\n\tDEBUG: variant $realvar, here as $var, in sample $isample was never present, so we are using covB information and setting it as 0/0 for the regular output and ?/? for the recall output. Variant information: ".join(" ",@{$refdicts->{$realvar}})."\n");
+                #print("\n\tDEBUG: variant $realvar, here as $var, in sample $isample was never present, so we are using covB information and setting it as 0/0 for the regular output and ?/? for the recall output. Variant information: ".join(" ",@{$refdicts->{$realvar}})."\n");
             }
         }
         #There are some problems here
@@ -314,7 +334,7 @@ for (my $isample=0; $isample<$nsamples; ++$isample)
         {
             if($refdicts->{$realvar}->[3]>=$max_alternate_reads) #We recall the variant here for the recalling output, ?/? for the other (we don't do anything). ATTENTION: recalling never generates an homozygous variant call. We may want to modify this if all the reads are variants?
             {
-                print("\n\tDEBUG: recalling $var\n");
+                #print("\n\tDEBUG: recalling $var\n");
                 $refdictr->{$realvar}->[0]=$covBdata[$isample]->{$var}->[2]>$covBdata[$isample]->{$var}->[1]?"1/0":"0/1";
             }
             elsif($refdicts->{$realvar}->[1]-$refdicts->{$realvar}->[2]<$max_alternate_reads)#Difference between the total number of reads and the number of reference reads, to calculate the number of alternative reads of any kind #There was enough depth and not too many alternate reads, so we call this as reference. WARNING: this may be too stringent if the depth is extreme. It is probably better to use proportion of reads instead of an absolute number. I am using any variant, instead of the variant of interest, because this will work much better with indels that are difficult to call, and would otherwise be called 0/0 here when it is unclear if it is the same indel but with the breakpoints not detected properly or a different one.
@@ -394,8 +414,8 @@ write_variant_file("$outdir/stats/var.csv",\%vars);
 write_variant_file("$outdir/stats/var_recalled.csv",\%rvars);
 
 #Comprehensive variant file, similar to ITHE results
-write_full_variantlist_file("$outdir/stats/final_variants.csv",\%vars,\@sdicts);
-write_full_variantlist_file("$outdir/stats/final_variants_recalled.csv",\%rvars,\@rdicts);
+write_full_variantlist_file("$outdir/stats/final_variants.tsv",\%vars,\@sdicts);
+write_full_variantlist_file("$outdir/stats/final_variants_recalled.tsv",\%rvars,\@rdicts);
 
 #CSV files with the genotype in each sample for each variant
 write_genotype_file("$outdir/stats/genotypes.csv",\@sdicts,\%vars);
@@ -577,10 +597,10 @@ sub write_full_variantlist_file
     my ($filename,$refvar,$refdict)=@_;
     mopen(my $OUT_FULLVAR, ">$filename");
     #print($OUT_VAR_STATS "CHROM,POS,ID,REF,ALT,NSAMPLES,KIND\n");
-    print($OUT_FULLVAR "CHROM,POS,REF,ALT,SAMPLE,GT,Depth,VariantN,NormalDepth,NormalVariantN,NormalThisVariantN,PAF,INDEL\n");
+    print($OUT_FULLVAR join($OFS,"CHROM","POS","REF","ALT","Name","Location","Type","Sample","Genotype","Depth","VariantN","NormalDepth","NormalVariantN","NormalThisVariantN","PAF","INDEL\n"));
     my @int_v;
     my @sortedvars=nat_i_sorter{@int_v=split($OFS,$_);$int_v[0],$int_v[1]} keys %$refvar;
-    my ($genotype,$sample_depth,$sample_variant_reads,$normal_depth,$normal_variant_reads,$normal_this_variant_reads,$paf,$indel);
+    my ($name,$location,$type,$genotype,$sample_depth,$sample_variant_reads,$normal_depth,$normal_variant_reads,$normal_this_variant_reads,$paf,$indel);
     my $sample;
     my @keyinfo;
     my @varinfo;
@@ -612,6 +632,10 @@ sub write_full_variantlist_file
 
         @keyinfo=split($OFS,$var);
 
+        #Get Annotation
+        ($name,$location,$type)=getAnnotation($var);
+        defined $name && defined $location && defined $type or die "$var annotation information not found\n";
+
         #Get Sample-Specific information    
         for (my $isample=0; $isample<$nsamples; ++$isample)
         {
@@ -621,7 +645,7 @@ sub write_full_variantlist_file
             {
                 @varinfo=@{$refdict->[$isample]->{$var}};
                 ($genotype,$sample_depth,$sample_variant_reads)=@varinfo[0,1,3];
-                print($OUT_FULLVAR join(",",@keyinfo[0..3],$samplename[$isample],$genotype,$sample_depth,$sample_variant_reads,$normal_depth,$normal_variant_reads,$normal_this_variant_reads,$paf,$indel."\n"));
+                print($OUT_FULLVAR join($OFS,@keyinfo[0..3],$name,$location,$type,$samplename[$isample],$genotype,$sample_depth,$sample_variant_reads,$normal_depth,$normal_variant_reads,$normal_this_variant_reads,$paf,$indel."\n"));
             }
 #            else
 #            {
@@ -692,18 +716,18 @@ sub get_files
     return @output;
 }
 
-# Parses the variants in vcf files pointed by the array @{$filesref} and adds them to the hash %{$hashref}
+# Parses the variants in a files using the function pointed by parse_function from the files pointed by the array @{$filesref} and adds them to the hash %{$hashref}
 # It calls a parsing function pointed by ref_parse_function
 # The value indicates the genotype
 # ########################################################################################################
 
-sub add_vcfvariants
+sub add_variants
 {
-    my ($hashref,$filesref)=@_;
+    my ($hashref,$filesref,$funref)=@_;
 
     foreach my $file (@{$filesref})
     {
-        my $irefhash=$ref_parse_function->($file);
+        my $irefhash=$funref->($file);
         $hashref={%$hashref,%$irefhash};
     }
     return $hashref;
@@ -801,6 +825,101 @@ sub parse_all_vcf
         }
     }
     return \%hash;
+}
+
+# Parse annotated.variant_function file generated by annovar returning a hash reference with keys in the form CHROM$OFSPOS$OFSREF$OFSALT and value = array_ref [Name,Position]
+##########################################################################
+sub parse_annovar
+{
+    my ($file)=@_;
+    open(my $FT,$file) or die "The file $file cannot be opened";
+    my @content=<$FT>;
+    close($FT);
+    my %hash;
+    my $key;
+    my $value;
+    my @temp;
+
+    for (my $i=0;$i<scalar @content;$i++)
+    {
+        chomp($content[$i]);
+        @temp=split($IFS,$content[$i]);
+        $key=join($OFS,$temp[2],$temp[3],$temp[5],$temp[6]);
+        $value=[$temp[1],$temp[0]];
+        $hash{$key}=$value;
+    }
+    return \%hash;
+}
+
+# Parse annotated.exomic_variant_function file generated by annovar returning a hash reference with keys in the form CHROM$OFSPOS$OFSREF$OFSALT and value = array_ref [type, mutation code]. The latter is not used yet, but I am keeping the information just in case
+##########################################################################
+sub parse_annovar_exonic
+{
+    my ($file)=@_;
+    open(my $FT,$file) or die "The file $file cannot be opened";
+    my @content=<$FT>;
+    close($FT);
+    my %hash;
+    my $key;
+    my $value;
+    my @temp;
+
+    for (my $i=0;$i<scalar @content;$i++)
+    {
+        chomp($content[$i]);
+        @temp=split($IFS,$content[$i]);
+        $key=join($OFS,$temp[3],$temp[4],$temp[6],$temp[7]);
+        $value=[$temp[1],$temp[2]];
+        $hash{$key}=$value;
+    }
+    return \%hash;
+}
+
+sub getAnnotation
+{
+    my ($var)=@_;
+    my $exonicInfo="";
+
+    if(! exists $annotationData{$var}) #Indels have a different format in Annovar, we need to do this to find the variants properly
+    {
+        $var=modVarAnnovar($var);#Mod var
+    }
+
+    exists $annotationData{$var} or return undef; #This will fail downstream, we should have info for all variants
+      
+    if($annotationData{$var}->[1] =~ m/^exonic/) #If this is an exonic variant, we can get its type from the other dict, otherwise, it will be an empty string
+    {
+        exists $exonicAnnotationData{$var} or return undef; #This will fail downstream, we should have exonic info for all exonic variants
+        $exonicInfo=$exonicAnnotationData{$var}->[0];
+    }
+    
+    return(@{$annotationData{$var}},$exonicInfo); 
+    
+}
+
+#Indels have a different format in Annovar, we need to do this to translate them to platypus VCF format
+sub modVarAnnovar
+{
+    my ($var)=@_;
+    my ($chr,$pos,$ref,$alt)=split($IFS,$var);
+    my ($newref,$newalt,$newpos);
+
+    ($newref,$newalt)=($ref,$alt);
+
+    if($alt=~m/^$ref/)
+    {
+        $newref="-";
+        $newalt=~s/^\Q$ref//;
+        $newpos=$pos;
+    }
+    if($ref=~m/^$alt/)
+    {
+        $newalt="-";
+        $newref=~s/^\Q$alt//;
+        $newpos=$pos+length($alt);
+    }
+    defined $newpos or die "Error translating the variant $var to the annovar format\n";
+    return(join($IFS,$chr,$newpos,$newref,$newalt));
 }
 
 #WARNING the order of information in the value of this dict is different than other version of this function used in other components of ITHE/MITHE
