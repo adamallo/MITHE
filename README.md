@@ -96,7 +96,7 @@ gunzip -c gnomad.genomes.r2.1.sites.vcf.bgz | head -n 1000 | grep '^# ' > gnomad
 gunzip -c gnomad.genomes.r2.1.sites.vcf.bgz | perl -pe 's/\t[^\t]*;(AF=[^;]+).*$/\t$1/' >> gnomad.genomes.r2.1.sites.onlyAFINFO.vcf
 ```
 # Usage
-The main MITHE executable script is MITHE_loop.sh. This program submits a series of jobs to call SNVs and calculate the intratumor heterogeneity in a patient using trios of samples (two somatic samples, usually neoplastic, and one control sample, usually healthy tissue). MITHE calls SNVs using platypus, then filters them using a complex algorithm and additional information from public repositories, and calculates the heterogeneity between the two somatic samples. MITHE_loop.sh uses a space-separated manifest file with the following structure `Sample Normal_file SampleA_file SampleB_file [DNA]` and as many rows as patients. The filtering options are user-specified, and if several options are provided, MITHE performs this process using all possible combinations of them. The user must also specify the number of CPU threads to request multi-threaded jobs, binary flags for vcf output, list of variants output, output verbosity, and to filter out indels.
+The main MITHE executable script is MITHE_loop.sh. This program submits a series of jobs to call SNVs and calculate the intratumor heterogeneity in a patient using all combinations of trios of samples (two somatic samples, usually neoplastic, and one control sample, usually healthy tissue). MITHE calls SNVs using platypus, then filters them using a complex algorithm and additional information from public repositories, and calculates the heterogeneity between the two somatic samples in each comparison. MITHE_loop.sh uses a space-separated manifest file with the following structure `Sample Normal_file Sample1_file Sample2_file SampleN_file` and as many rows as patients. The filtering options are user-specified, and if several options are provided, MITHE performs this process using all possible combinations of them. The user must also specify the number of CPU threads to request multi-threaded jobs, binary flags for vcf output, list of variants output, output verbosity, and to filter out indels. After these paired comparisons are finished, the information of all samples is integrated and variants are called using the combined information of all samples using the MITHE_getVariants.sh executable (see below).
 
 Example for parameter optimization using 8 CPU threads per parallel job, without any variant output (only the optimization summary), including indels. **WARNING**: it is not recommended to activate variant output when using MITHE for optimization due to the volume of output files (and IO operations).
 ```
@@ -108,10 +108,10 @@ Example for variant calling using 8 CPU threads per parallel job, with all the o
 ../MITHE_loop.sh out manifest.txt params/exe_params params/filtering_params params/NAB_params params/covB_params params/PAF_params 8 1 1 2 1
 ```
 
-To obtain the final list of variants after all MITHE jobs have finished, execute the MITHE_getVariants.sh, indicating the folder with MITHE results and the output file name. This can only be done when MITHE has run with output verbosity=2, and vcf output activated.
+To obtain the final variant analysis after all MITHE jobs have finished, execute the MITHE_getVariants.sh, indicating the folder with MITHE results and the manifest file. This can only be done when MITHE has run with output verbosity=2, vcf output activated, and only one combination of parameter values (see below).
 
 ```
-../MITHE_getVariants.sh out/ variants.tsv
+../MITHE_getVariants.sh out manifest.txt [recalling options]
 ```
 
 ## MITHE parameters
@@ -194,12 +194,35 @@ Example:
 ```
 --max_pAF,0.25
 ```
+## Variant recalling
+This process integrates the information of all variants selected across all comparisons to make the final variant calls in each sample. It is carried out by the MITHE_getVariants.sh executable file, and controlled by two parameters:
+
+- --min_coverage: minimum coverage per locus to recall a variant
+- --min_alternative_reads: minimum number of alternative reads to call a variant in a sample in which it was not detected before.
+
+First, for each sample, all variants detected in the different comparisons are collected. Then, the position of each of these variants present in any sample is checked in all samples. For a given variant V in sample S, V_S, it is checked if a variant was originally detected and then filtered out by MITHE, or never detected. If it was never detected, getVariants assigns the genotype of the control sample, otherwise it is considered missing data ?/?. This constitutes the default non-recalled output.
+
+When recalling variants, both those discarded by MITHE and never called in a sample are assigned the genotype of the control sample if coverage>min_coverage and variant_reads<min_alternative_reads, heterozygous variant if coverage>min_coverage and variant_reads>=min_alternative_reads, and missing data otherwise. 
 
 ## Output
 ### Statistics and optimization
 The main output of MITHE_loop.sh is the results.csv file. This comma-separated file contains many statistics at different stages of the pipeline for each case and combination of parameter values. The final similarity can be found in the filtNABcovBPAF_propU column.
+
 ### Variants
-The final list of variants can be obtained using the MITHE_getVariants.sh command, as explained above.
+The final list of variants can be obtained using the MITHE_getVariants.sh command, as explained above. This script generates a folder named Patient_variants with the following outputs:
+
+- stats/final_variants.tsv: Tab-separated file with information of all variants in all samples, like genotypes, variant annotation, etc. *This is the most comprehensive output for variants before recalling.*
+- stats/final_variants_recalled.tsv: Tab-separated file with information of all variants in all samples, like genotypes, variant annotation, etc. *This is the most comprehensive output for variants after recalling.*
+- stats/genotypes.tsv: Tab-separated file with the genotype of each variant (column) in each sample (row). Before recall.
+- stats/genotypes_recalled.tsv: Tab-separated file with the genotype of each variant (column) in each sample (row). After recall.
+- stats/sample.tsv: Tab-separated file with a summary indicating the number of clonal, subclonal, and private mutations in each sample. Before recall.
+- stats/sample_recalled.tsv: Tab-separated file with a summary indicating the number of clonal, subclonal, and private mutations in each sample. After recall.
+- stats/var.tsv: Tab-separated file with a summary indicating the number of samples that share each variant, classifying it as Clonal, Subclonal, or Private. Before recall.
+- stats/var_recalled.tsv: Tab-separated file with a summary indicating the number of samples that share each variant, classifying it as Clonal, Subclonal, or Private. After recall.
+- stats/cloneFinder.tsv: **WARNING: This implementation is under development and may be buggy and/or generate incorrect alignments** Input of CloneFinder with all variants after recalling
+- alignments/alignment.fas: **WARNING: This implementation is under development and may be buggy and/or generate incorrect alignments** FASTA alignment with all variants before recalling
+- alignments/alignment_recalled.fas: **WARNING: This implementation is under development and may be buggy and/or generate incorrect alignments** FASTA alignment with all variants after recalling
+- vcfs/ : This folder will contain a vcf file per sample with a final list of variants. **IMPORTANT: these vcfs do not contain recalled variants at this point, but may in future versions of this software**.
 
 # Citation
 Fortunato A\*, Mallo D\*, Rupp SM, King LM, Hardman T, Lo J, Hall A, Marks JR, Hwang ES, Maley CC (2021) A new method to accurately identify single nucleotide variants using small FFPE breast samples. Briefings in Bioinformatics. DOI: [10.1093/bib/bbab221](https://doi.org/10.1093/bib/bbab221)

@@ -406,20 +406,20 @@ for (my $isample=0; $isample<$nsamples; ++$isample)
 }
 
 #Samples files, with the number of clonal, subclonal, and private variants
-write_sample_file("$outdir/stats/sample.csv",\%samples);
-write_sample_file("$outdir/stats/sample_recalled.csv",\%rsamples);
+write_sample_file("$outdir/stats/sample.tsv",\%samples);
+write_sample_file("$outdir/stats/sample_recalled.tsv",\%rsamples);
 
 #Variant files, with the number of samples that contain them and a classification of clonal, subclonal, and private
-write_variant_file("$outdir/stats/var.csv",\%vars);
-write_variant_file("$outdir/stats/var_recalled.csv",\%rvars);
+write_variant_file("$outdir/stats/var.tsv",\%vars);
+write_variant_file("$outdir/stats/var_recalled.tsv",\%rvars);
 
 #Comprehensive variant file, similar to ITHE results
 write_full_variantlist_file("$outdir/stats/final_variants.tsv",\%vars,\@sdicts);
 write_full_variantlist_file("$outdir/stats/final_variants_recalled.tsv",\%rvars,\@rdicts);
 
 #CSV files with the genotype in each sample for each variant
-write_genotype_file("$outdir/stats/genotypes.csv",\@sdicts,\%vars);
-write_genotype_file("$outdir/stats/genotypes_recalled.csv",\@rdicts,\%rvars);
+write_genotype_file("$outdir/stats/genotypes.tsv",\@sdicts,\%vars);
+write_genotype_file("$outdir/stats/genotypes_recalled.tsv",\@rdicts,\%rvars);
 
 #FASTA files TODO:WARNING:WORKING HERE this is a quick and dirty solution. I am only considering the mutated allele, and eliminating INDELS. The normal is a fake all 0/0, when it should be called from covN
 write_FASTA_file("$outdir/alignments/alignment.fas",\@sdicts,\%vars);
@@ -575,7 +575,7 @@ sub write_variant_file
 {
     my ($filename,$refdata)=@_;
     mopen(my $OUT_VAR_STATS, ">$filename");
-    print($OUT_VAR_STATS "CHROM,POS,ID,REF,ALT,NSAMPLES,KIND\n");
+    print($OUT_VAR_STATS join($OFS,"CHROM","POS","ID","REF","ALT","NSAMPLES","KIND\n"));
     my @int_v;
     my @sortedvars=nat_i_sorter{@int_v=split($OFS,$_);$int_v[0],$int_v[1]} keys %$refdata;
     foreach my $var (@sortedvars)
@@ -587,7 +587,7 @@ sub write_variant_file
         {
             $kind=$refdata->{$var}==$nsamples?"Clonal":"Subclonal";
         }
-        print($OUT_VAR_STATS join(",",@temp[0..1],$var,@temp[2..3],$refdata->{$var},$kind)."\n");
+        print($OUT_VAR_STATS join($OFS,@temp[0..1],$var,@temp[2..3],$refdata->{$var},$kind)."\n");
     }
     close($OUT_VAR_STATS);
 }
@@ -660,12 +660,12 @@ sub write_sample_file
 {
     my ($filename,$refdata)=@_;
     mopen(my $OUT_SAMPLE_STATS, ">$filename");
-    print($OUT_SAMPLE_STATS "Sample,Clonal,Subclonal,Private\n");
+    print($OUT_SAMPLE_STATS join($OFS,"Sample","Clonal","Subclonal","Private\n"));
     for (my $isample=0; $isample<$nsamples; ++$isample)
     {
         my $sample=sprintf("S%0*d",$ndigits,$isample);
         # 1 line per sample summary
-        print($OUT_SAMPLE_STATS join(",", $samplename[$isample], @{$refdata->{$sample}})."\n");
+        print($OUT_SAMPLE_STATS join($OFS, $samplename[$isample], @{$refdata->{$sample}})."\n");
     }
     close($OUT_SAMPLE_STATS);
 }

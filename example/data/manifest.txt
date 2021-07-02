@@ -1,2 +1,1 @@
-Test1 Control.bam Sample1.bam Sample2.bam 20
-Test2 Control.bam Sample3.bam Sample4.bam 20
+Test Test_control.bam Test_sample1.bam Test_sample2.bam Test_sample3.bam
